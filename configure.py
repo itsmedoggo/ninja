@@ -529,7 +529,7 @@ else:
 n.newline()
 
 if platform.is_msvc():
-    libs.append('ninja.lib')
+    libs.append('ninja.lib shell32.lib shlwapi.lib')
 else:
     libs.append('-lninja')
 

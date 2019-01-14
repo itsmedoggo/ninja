@@ -18,6 +18,9 @@
 
 #include "util.h"
 
+#include <shellapi.h>
+#include <shlwapi.h>
+
 namespace {
 
 string Replace(const string& input, const string& find, const string& replace) {
@@ -65,7 +68,60 @@ int CLWrapper::Run(const string& command, string* output) {
   startup_info.hStdOutput = stdout_write;
   startup_info.dwFlags |= STARTF_USESTDHANDLES;
 
-  if (!CreateProcessA(NULL, (char*)command.c_str(), NULL, NULL,
+  size_t delim_index = 0;
+  string file_path = "";
+  string arguments = "";
+
+  // If first char is '"' then find the next '"'
+  if (command.front() == '"') {
+    delim_index = command.find('"', 1);
+    // If found, extract the full path
+    if (delim_index != string::npos) {
+      file_path = command.substr(0, delim_index+1); // include second quote
+    }
+    else {
+      Win32Fatal("CreateProcess", "No end quote around path");
+    }
+  }
+  // Look for first space in command. Can still be a valid command
+  // with no spaces.
+  else {
+    delim_index = command.find(' ');
+    file_path = command.substr(0, delim_index); // do not include space
+  }
+
+  if (command.length() > file_path.length()) {
+    arguments = command.substr(file_path.length()+1);
+  }
+
+  // Get file name from file_path
+  string file_name((char*)PathFindFileNameA(file_path.c_str()));
+
+  // Check if file is binary or if we need to find the associated executable
+  LPDWORD executable_type = 0;
+  bool is_executable = GetBinaryTypeA((char*)file_path.c_str(),
+                                      executable_type);
+
+  // If not executable, search for the associated executable
+  string executable_path = file_path;
+  if (!is_executable) {
+    char buffer[MAX_PATH];
+    if ((int)FindExecutableA((char*)file_name.c_str(), NULL, buffer) <= 32) {
+      DWORD error = GetLastError();
+      if (error == SE_ERR_NOASSOC) {
+        string err = "No executable associated with ";
+        err += file_path;
+        Win32Fatal("CreateProcess", err.c_str());
+      } else if (error == SE_ERR_FNF || error == SE_ERR_PNF) {
+        return true;
+      }
+    }
+    executable_path = buffer;
+    executable_path.push_back(' ');
+  }
+  executable_path += arguments;
+
+  if (!CreateProcessA(NULL, (char*)executable_path.c_str(), NULL, NULL,
                       /* inherit handles */ TRUE, 0,
                       env_block_, NULL,
                       &startup_info, &process_info)) {

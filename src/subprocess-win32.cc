@@ -21,6 +21,9 @@
 
 #include "util.h"
 
+#include <shellapi.h>
+#include <shlwapi.h>
+
 Subprocess::Subprocess(bool use_console) : child_(NULL) , overlapped_(),
                                            is_reading_(false),
                                            use_console_(use_console) {
@@ -105,9 +108,72 @@ bool Subprocess::Start(SubprocessSet* set, const string& command) {
   // Ninja handles ctrl-c, except for subprocesses in console pools.
   DWORD process_flags = use_console_ ? 0 : CREATE_NEW_PROCESS_GROUP;
 
+  size_t delim_index = 0;
+  string file_path = "";
+  string arguments = "";
+
+  // If first char is '"' then find the next '"'
+  if (command.front() == '"') {
+    delim_index = command.find('"', 1);
+    // If found, extract the full path
+    if (delim_index != string::npos) {
+      file_path = command.substr(0, delim_index+1); // include second quote
+    }
+    else {
+      Win32Fatal("CreateProcess", "No end quote around path");
+    }
+  }
+  // Look for first space in command. Can still be a valid command
+  // with no spaces.
+  else {
+    delim_index = command.find(' ');
+    file_path = command.substr(0, delim_index); // do not include space
+  }
+
+  if (command.length() > file_path.length()) {
+    arguments = command.substr(file_path.length()+1);
+  }
+
+  // Get file name from file_path
+  string file_name((char*)PathFindFileNameA(file_path.c_str()));
+
+  // Check if file is binary or if we need to find the associated executable
+  LPDWORD executable_type = 0;
+  bool is_executable = GetBinaryTypeA((char*)file_path.c_str(),
+                                      executable_type);
+
+  // If not executable, search for the associated executable
+  string executable_path = file_path;
+  if (!is_executable) {
+    char buffer[MAX_PATH];
+    if ((int)FindExecutableA((char*)file_name.c_str(), NULL, buffer) <= 32) {
+      DWORD error = GetLastError();
+      if (error == SE_ERR_NOASSOC) {
+        string err = "No executable associated with ";
+        err += file_path;
+        Win32Fatal("CreateProcess", err.c_str());
+      } else if (error == SE_ERR_FNF || error == SE_ERR_PNF) {
+        // File (program) not found error is treated as a normal build
+        // action failure.
+        if (child_pipe)
+          CloseHandle(child_pipe);
+        CloseHandle(pipe_);
+        CloseHandle(nul);
+        pipe_ = NULL;
+        // child_ is already NULL;
+        buf_ = "CreateProcess failed: The system cannot find the file "
+            "specified.\n";
+        return true;
+      }
+    }
+    executable_path = buffer;
+    executable_path.push_back(' ');
+  }
+  executable_path += arguments;
+
   // Do not prepend 'cmd /c' on Windows, this breaks command
   // lines greater than 8,191 chars.
-  if (!CreateProcessA(NULL, (char*)command.c_str(), NULL, NULL,
+  if (!CreateProcessA(NULL, (char*)executable_path.c_str(), NULL, NULL,
                       /* inherit handles */ TRUE, process_flags,
                       NULL, NULL,
                       &startup_info, &process_info)) {
@@ -129,7 +195,9 @@ bool Subprocess::Start(SubprocessSet* set, const string& command) {
       // context for this case.
       Win32Fatal("CreateProcess", "is the command line too long?");
     } else {
-      Win32Fatal("CreateProcess");    // pass all other errors to Win32Fatal
+      string err = "Error with ";
+      err += executable_path;
+      Win32Fatal("CreateProcess", err.c_str());    // pass all other errors to Win32Fatal
     }
   }
 
